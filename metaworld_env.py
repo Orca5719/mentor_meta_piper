@@ -154,6 +154,7 @@ class ExtendedTimeStep(NamedTuple):
     observation: Any
     action: Any
     success: Any
+    is_intervened: Any = False
 
     def first(self):
         return self.step_type == StepType.FIRST
@@ -205,7 +206,8 @@ class metaworld_wrapper():
                                  action=np.zeros(self.action_spec().shape, dtype=self.action_spec().dtype),
                                  reward=0.0,
                                  discount=1.0,
-                                success = time_step['success'])
+                                success = time_step['success'],
+                                is_intervened=False)
     def step(self, action):
         action = {'action':action}
         time_step = self._env.step(action)
@@ -224,7 +226,8 @@ class metaworld_wrapper():
                                  action=action['action'],
                                  reward=time_step['reward'],
                                  discount=1.0,
-                                success = time_step['success'])
+                                success = time_step['success'],
+                                is_intervened=False)
 
 def make(name, frame_stack, action_repeat, seed):
     env = MetaWorld(name, seed,action_repeat, (84,84), 'corner2')

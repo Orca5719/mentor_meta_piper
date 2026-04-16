@@ -152,7 +152,9 @@ class ReplayBuffer(IterableDataset):
             step_reward = episode['reward'][idx + i]
             reward += discount * step_reward
             discount *= episode['discount'][idx + i] * self._discount
-        return (obs, action, reward, discount, next_obs)
+        # is_intervened flag (default 0.0 for episodes without this field)
+        is_intervened = episode.get('is_intervened', np.zeros_like(episode['reward']))[idx]
+        return (obs, action, reward, discount, next_obs, is_intervened)
 
     def __iter__(self):
         while True:

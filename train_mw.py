@@ -132,11 +132,12 @@ class Workspace:
             print("[Real Mode] Using PiPER robot for both train and eval")
         else:
             self.eval_env = _make_env(self.cfg)
-        # create replay buffer
+        # create replay buffer (with is_intervened field)
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),
                       specs.Array((1, ), np.float32, 'reward'),
-                      specs.Array((1, ), np.float32, 'discount'))
+                      specs.Array((1, ), np.float32, 'discount'),
+                      specs.Array((1, ), np.float32, 'is_intervened'))
 
         self.replay_storage = ReplayBufferStorage(data_specs,
                                                   self.work_dir / 'buffer')
@@ -236,8 +237,20 @@ class Workspace:
             log('episode', self.global_episode)
             log('step', self.global_step)
 
+    def _init_spacemouse(self):
+        """Initialize Spacemouse reader for real-mode intervention."""
+        spacemouse_cfg = getattr(self.cfg, 'spacemouse', None)
+        if spacemouse_cfg is None or not getattr(spacemouse_cfg, 'enabled', False):
+            return None
+        from spacemouse_reader import SpacemouseReader
+        reader = SpacemouseReader(
+            dead_zone=getattr(spacemouse_cfg, 'dead_zone', 0.1),
+        )
+        reader.start()
+        return reader
+
     def train(self):
-        # predicates 
+        # predicates
         # frames = steps * action_repeat
         train_until_step = utils.Until(self.cfg.num_train_frames,
                                        self.cfg.action_repeat)
@@ -246,7 +259,13 @@ class Workspace:
         eval_every_step = utils.Every(self.cfg.eval_every_frames,
                                       self.cfg.action_repeat)
 
+        # Initialize Spacemouse for real-mode intervention
+        spacemouse_reader = None
+        if getattr(self.cfg, 'real_mode', False):
+            spacemouse_reader = self._init_spacemouse()
+
         episode_step, episode_reward, episode_sr = 0, 0, False
+        episode_interventions = 0
         time_step = self.train_env.reset()
         self.replay_storage.add(time_step)
         metrics = None
@@ -300,8 +319,17 @@ class Workspace:
                                         self.global_step,
                                         eval_mode=False)
 
+            # Spacemouse intervention check (available throughout training)
+            is_intervened = False
+            if spacemouse_reader is not None:
+                sm_action, is_intervening = spacemouse_reader.get_action()
+                if is_intervening and sm_action is not None:
+                    # Map Spacemouse 7D to PiperEnv 4D: [dx, dy, dz, gripper]
+                    action = sm_action[[0, 1, 2, 6]]
+                    is_intervened = True
+
             # try to update the agent
-            if not seed_until_step(self.global_step) and self.global_step % self.cfg.update_every_steps == 0:   
+            if not seed_until_step(self.global_step) and self.global_step % self.cfg.update_every_steps == 0:
                 metrics = self.agent.update(
                     self.replay_iter, self.global_step
                 ) if self.global_step % self.cfg.update_every_steps == 0 else dict()
@@ -312,6 +340,12 @@ class Workspace:
             # take env step
             time_step = self.train_env.step(action)
             episode_reward += time_step.reward
+            # Attach intervention flag to time_step before storing
+            if is_intervened:
+                time_step = time_step._replace(is_intervened=np.array([1.0], dtype=np.float32))
+                episode_interventions += 1
+            else:
+                time_step = time_step._replace(is_intervened=np.array([0.0], dtype=np.float32))
             self.replay_storage.add(time_step)
             episode_step += 1
             self._global_step += 1
