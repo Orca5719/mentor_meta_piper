@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
+import shutil
 
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
@@ -28,6 +29,49 @@ from utils import models_tuple
 from copy import deepcopy
 
 torch.backends.cudnn.benchmark = True
+
+
+def _make_env(cfg):
+    """Create environment based on real_mode config.
+
+    If real_mode is enabled, use PiPER real robot environment;
+    otherwise, use MetaWorld simulation environment.
+    """
+    if getattr(cfg, 'real_mode', False):
+        import piper_env as pe
+        real_cfg = getattr(cfg, 'real', None)
+        kwargs = {}
+        if real_cfg is not None:
+            kwargs = {
+                'can_port': getattr(real_cfg, 'can_port', 'can0'),
+                'action_scale': getattr(real_cfg, 'action_scale', 2.0),
+                'gripper_range': getattr(real_cfg, 'gripper_range', 0.08),
+                'speed': getattr(real_cfg, 'speed', 50),
+                'max_episode_steps': getattr(cfg, 'episode_length', 250),
+                'use_realsense': getattr(real_cfg, 'use_realsense', True),
+                'realsense_serial': getattr(real_cfg, 'realsense_serial', None),
+                'realsense_resolution': list(getattr(real_cfg, 'realsense_resolution', [640, 480])),
+                'realsense_fps': getattr(real_cfg, 'realsense_fps', 30),
+                'calibration_file': getattr(real_cfg, 'calibration_file', None),
+                'manual_reward': getattr(real_cfg, 'manual_reward', True),
+            }
+            # Workspace bounds (mm)
+            if hasattr(real_cfg, 'workspace'):
+                ws = real_cfg.workspace
+                kwargs['workspace'] = {
+                    'x_min': getattr(ws, 'x_min', -200),
+                    'x_max': getattr(ws, 'x_max', 200),
+                    'y_min': getattr(ws, 'y_min', -200),
+                    'y_max': getattr(ws, 'y_max', 200),
+                    'z_min': getattr(ws, 'z_min', 50),
+                    'z_max': getattr(ws, 'z_max', 400),
+                }
+            # Home pose (mm, deg)
+            if hasattr(real_cfg, 'home_pose'):
+                kwargs['home_pose'] = np.array(real_cfg.home_pose)
+        return pe.make(cfg.task_name, cfg.frame_stack, cfg.action_repeat, cfg.seed, **kwargs)
+    else:
+        return mw.make(cfg.task_name, cfg.frame_stack, cfg.action_repeat, cfg.seed)
 
 
 def make_agent(obs_spec, action_spec, cfg):
@@ -81,10 +125,13 @@ class Workspace:
                              use_tb=self.cfg.use_tb,
                              use_wandb=self.cfg.use_wandb)
         # create envs
-        self.train_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
-                                  self.cfg.action_repeat, self.cfg.seed)
-        self.eval_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
-                                 self.cfg.action_repeat, self.cfg.seed)
+        self.train_env = _make_env(self.cfg)
+        if getattr(self.cfg, 'real_mode', False):
+            # Real mode: share the same env (single robot), no separate eval env
+            self.eval_env = self.train_env
+            print("[Real Mode] Using PiPER robot for both train and eval")
+        else:
+            self.eval_env = _make_env(self.cfg)
         # create replay buffer
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),
@@ -93,6 +140,9 @@ class Workspace:
 
         self.replay_storage = ReplayBufferStorage(data_specs,
                                                   self.work_dir / 'buffer')
+        # load pretrained buffer if specified
+        if self.cfg.pretrain_buffer_dir is not None:
+            self._load_pretrain_buffer(self.cfg.pretrain_buffer_dir)
         self.replay_loader, self.buffer = make_replay_loader(
             self.work_dir / 'buffer', self.cfg.replay_buffer_size,
             self.cfg.batch_size,
@@ -133,6 +183,23 @@ class Workspace:
     def nstep(self):
         return math.floor(self._nstep + self._nstep_alpha *
                           math.exp(-self.global_step / self._nstep_alpha_temp))
+
+    def _load_pretrain_buffer(self, pretrain_dir):
+        """Copy pretrained buffer .npz files into current replay buffer directory."""
+        pretrain_path = Path(pretrain_dir)
+        if not pretrain_path.exists():
+            print(f'[WARNING] Pretrain buffer dir not found: {pretrain_path}')
+            return
+        buffer_dir = self.work_dir / 'buffer'
+        npz_files = list(pretrain_path.glob('*.npz'))
+        if len(npz_files) == 0:
+            print(f'[WARNING] No .npz files found in {pretrain_path}')
+            return
+        for src in npz_files:
+            dst = buffer_dir / src.name
+            if not dst.exists():
+                shutil.copy2(str(src), str(dst))
+        print(f'[INFO] Loaded {len(npz_files)} pretrained buffer episodes from {pretrain_path}')
 
     def update_buffer(self):
         #self.buffer.update_discount(self.discount)
