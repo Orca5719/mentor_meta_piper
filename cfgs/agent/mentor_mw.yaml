@@ -38,3 +38,4 @@ agent:
   num_experts: 16
   top_k: 4
   dropout: 0.1
+  intervention_bonus: 2.0  # loss weight multiplier for Spacemouse-intervened steps
