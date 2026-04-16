@@ -44,3 +44,9 @@ episode_length: 250
 # Safety: no snapshot saving by default on real robot
 save_snapshot: false
 save_video: false
+
+# Spacemouse intervention
+spacemouse:
+  enabled: true
+  dead_zone: 0.1          # input dead zone threshold
+  intervention_bonus: 2.0  # loss weight multiplier for intervened steps
