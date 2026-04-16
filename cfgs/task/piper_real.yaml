@@ -1,0 +1,46 @@
+# @package _global_
+
+# PiPER real robot configuration
+# Usage:
+#   python train_mw.py task_name=assembly real_mode=true real=real_piper
+#   With pretrained model: python train_mw.py task_name=assembly real_mode=true real=real_piper load_from_id=true load_id=50000
+
+real_mode: true
+
+real:
+  can_port: can0
+  action_scale: 2.0       # mm per action unit (action ∈ [-1,1])
+  gripper_range: 0.08     # max gripper opening in meters
+  speed: 50               # robot motion speed (0-100)
+  home_pose: [57.0, 0.0, 215.0, 0.0, 85.0, 0.0]  # [X_mm, Y_mm, Z_mm, RX_deg, RY_deg, RZ_deg]
+  
+  workspace:
+    x_min: -200
+    x_max: 200
+    y_min: -200
+    y_max: 200
+    z_min: 50
+    z_max: 400
+
+  # RealSense camera
+  use_realsense: true
+  realsense_serial: null       # null = auto-detect, or set serial number string
+  realsense_resolution: [640, 480]
+  realsense_fps: 30
+
+  # Hand-eye calibration file (run calibration script first)
+  calibration_file: null       # e.g., "calibration.npy"
+
+  # Manual reward: press SPACE for +10 reward + success, Q for e-stop
+  manual_reward: true
+
+# Override training params for real robot
+num_train_frames: 100000   # fewer frames for real world
+num_seed_frames: 500       # fewer random seed frames
+eval_every_frames: 5000
+num_eval_episodes: 3       # fewer eval episodes on real robot
+episode_length: 250
+
+# Safety: no snapshot saving by default on real robot
+save_snapshot: false
+save_video: false
