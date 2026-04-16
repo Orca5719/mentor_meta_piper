@@ -24,6 +24,7 @@ use_wandb: true
 # replay buffer
 replay_buffer_size: 1000000
 replay_buffer_num_workers: 4
+pretrain_buffer_dir: null  # path to pretrained buffer dir (e.g., /path/to/prev_exp/buffer)
 nstep: 3
 batch_size: 256
 # misc
@@ -32,6 +33,8 @@ device: cuda
 save_video: true
 save_train_video: false
 use_tb: true
+# real robot mode
+real_mode: false  # set to true to use PiPER real robot instead of simulation
 # experiment
 experiment: exp
 # agent
