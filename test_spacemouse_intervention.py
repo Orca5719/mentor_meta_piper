@@ -122,14 +122,11 @@ def main():
     reader.stop()
     print("[Test] Spacemouse reader stopped.")
 
-    # Move back to home pose first, then disable
-    print("[Test] Returning to home pose before disable...")
+    # Move back to home (zero) position
+    print("[Test] Returning to zero position...")
     robot.move_to_pose(*HOME_POSE, speed=30)
     time.sleep(2.0)
-    print("[Test] Home pose reached. Now disabling...")
-
-    robot.disable()
-    print("[Test] Robot disabled. Done.")
+    print("[Test] Zero position reached. Done.")
 
 
 if __name__ == "__main__":
