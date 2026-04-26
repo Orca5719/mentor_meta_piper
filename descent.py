@@ -54,7 +54,7 @@ class PiperRobotTrainer:
         self.IMG_WIDTH = 256
         self.frame_stack = 3
         self.batch_size = 256
-        self.update_every_episodes = 10
+        self.update_every_episodes = 5
         self.save_interval = 1000
         self.seed_steps = 1000
 
