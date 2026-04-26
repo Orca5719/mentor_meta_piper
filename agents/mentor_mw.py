@@ -248,7 +248,8 @@ class MENTORAgent:
                  lr_actor_ratio, aux_loss_scale_warmup, aux_loss_scale_warmsteps,
                  aux_loss_scale, aux_loss_type, encoder_type, resnet_fix,
                  oneXone_reg_scale, oneXone_reg_ratio, pretrained_factor, tp_set_size,
-                 moe_gate_dim, moe_hidden_dim, num_experts, top_k, dropout):
+                 moe_gate_dim, moe_hidden_dim, num_experts, top_k, dropout,
+                 intervention_bonus=1.0):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.use_tb = use_tb
@@ -284,6 +285,7 @@ class MENTORAgent:
         self.num_experts = num_experts
         self.top_k = top_k
         self.dropout = dropout
+        self.intervention_bonus = intervention_bonus
 
         # models
         self.encoder = Encoder(obs_shape, encoder_type, resnet_fix, pretrained_factor).to(device)
@@ -348,7 +350,7 @@ class MENTORAgent:
                 action.uniform_(-1.0, 1.0)
         return action.cpu().numpy()[0]
 
-    def update_predictor(self, obs, action):
+    def update_predictor(self, obs, action, is_intervened=None):
         metrics = dict()
 
         Q1, Q2 = self.critic(obs, action)
@@ -357,7 +359,11 @@ class MENTORAgent:
         vf_err = V - Q
         vf_sign = (vf_err > 0).float()
         vf_weight = (1 - vf_sign) * self.expectile + vf_sign * (1 - self.expectile)
-        predictor_loss = (vf_weight * (vf_err**2)).mean()
+        per_sample_loss = vf_weight * (vf_err**2)
+        if is_intervened is not None and self.intervention_bonus > 1.0:
+            intervene_mask = (is_intervened.squeeze(-1) > 0.5).float()
+            per_sample_loss = per_sample_loss * (1.0 + (self.intervention_bonus - 1.0) * intervene_mask)
+        predictor_loss = per_sample_loss.mean()
 
         if self.use_tb:
             metrics['predictor_loss'] = predictor_loss.item()
@@ -368,7 +374,7 @@ class MENTORAgent:
 
         return metrics
 
-    def update_critic(self, obs, action, reward, discount, next_obs, step):
+    def update_critic(self, obs, action, reward, discount, next_obs, step, is_intervened=None):
         metrics = dict()
 
         with torch.no_grad():
@@ -382,7 +388,13 @@ class MENTORAgent:
             target_Q = reward + (discount * target_V)
 
         Q1, Q2 = self.critic(obs, action)
-        critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
+        Q1_loss = F.mse_loss(Q1, target_Q, reduction='none')
+        Q2_loss = F.mse_loss(Q2, target_Q, reduction='none')
+        if is_intervened is not None and self.intervention_bonus > 1.0:
+            intervene_mask = (is_intervened.squeeze(-1) > 0.5).float()
+            Q1_loss = Q1_loss * (1.0 + (self.intervention_bonus - 1.0) * intervene_mask)
+            Q2_loss = Q2_loss * (1.0 + (self.intervention_bonus - 1.0) * intervene_mask)
+        critic_loss = Q1_loss.mean() + Q2_loss.mean()
 
         if self.use_tb:
             metrics['critic_target_q'] = target_Q.mean().item()
@@ -407,7 +419,7 @@ class MENTORAgent:
 
         return metrics
 
-    def update_actor(self, obs, step):
+    def update_actor(self, obs, step, is_intervened=None):
         metrics = dict()
         dist, aux_loss = self.actor(obs, self.stddev(step), metrics)
         action = dist.sample(clip=self.stddev_clip)
@@ -415,7 +427,11 @@ class MENTORAgent:
         Q1, Q2 = self.critic(obs, action)
         Q = torch.min(Q1, Q2)
 
-        actor_loss = -Q.mean()
+        per_sample_actor_loss = -Q
+        if is_intervened is not None and self.intervention_bonus > 1.0:
+            intervene_mask = (is_intervened.squeeze(-1) > 0.5).float()
+            per_sample_actor_loss = per_sample_actor_loss * (1.0 + (self.intervention_bonus - 1.0) * intervene_mask)
+        actor_loss = per_sample_actor_loss.mean()
 
         # optimize actor
         self.actor_opt.zero_grad(set_to_none=True)
@@ -456,7 +472,7 @@ class MENTORAgent:
             self.perturb_time += 1
 
         batch = next(replay_iter)
-        obs, action, reward, discount, next_obs = utils.to_torch(batch, self.device)
+        obs, action, reward, discount, next_obs, is_intervened = utils.to_torch(batch, self.device)
 
         # augment
         obs = self.aug(obs.float())
@@ -478,15 +494,16 @@ class MENTORAgent:
             metrics['batch_reward'] = reward.mean().item()
             metrics['actor_dormant_ratio'] = self.dormant_ratio
             metrics['aux_loss_scale'] = self.aux_loss_scale
+            metrics['batch_intervene_ratio'] = is_intervened.mean().item()
         
         # update predictor
-        metrics.update(self.update_predictor(obs.detach(), action))
+        metrics.update(self.update_predictor(obs.detach(), action, is_intervened))
 
         # update critic
-        metrics.update(self.update_critic(obs, action, reward, discount, next_obs, step))
+        metrics.update(self.update_critic(obs, action, reward, discount, next_obs, step, is_intervened))
 
         # update actor
-        metrics.update(self.update_actor(obs.detach(), step))
+        metrics.update(self.update_actor(obs.detach(), step, is_intervened))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target, self.critic_target_tau)
