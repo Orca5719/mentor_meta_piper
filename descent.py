@@ -162,9 +162,9 @@ class PiperRobotTrainer:
         self._buffer_dir.mkdir(exist_ok=True)
         self.replay_storage = ReplayBufferStorage(data_specs, self._buffer_dir)
 
-        self.replay_loader, _ = make_replay_loader(
-            self._buffer_dir, max_size=100000, batch_size=self.batch_size, num_workers=4,
-            save_snapshot=False, nstep=3, discount=0.99
+        self.replay_loader, self._replay_buffer = make_replay_loader(
+            self._buffer_dir, max_size=100000, batch_size=self.batch_size, num_workers=0,
+            save_snapshot=True, nstep=3, discount=0.99
         )
         self.replay_iter = iter(self.replay_loader)
 
@@ -400,9 +400,21 @@ class PiperRobotTrainer:
         return action, False
 
     def update_policy(self, num_updates=100):
-        if self.agent is None or self.replay_loader is None:
+        if self.agent is None:
+            print("⚠️  Agent未初始化，跳过策略更新")
             return
-        if self._global_step < self.seed_steps:
+        if self.replay_loader is None:
+            print("⚠️  ReplayLoader未初始化，跳过策略更新")
+            return
+
+        # 确保replay buffer已加载最新数据
+        if hasattr(self, '_replay_buffer') and self._replay_buffer is not None:
+            self._replay_buffer._samples_since_last_fetch = self._replay_buffer._fetch_every
+
+        # 检查是否有足够的episode数据
+        npz_files = list(self._buffer_dir.glob('*.npz'))
+        if len(npz_files) == 0:
+            print("⚠️  暂无完整episode数据，跳过策略更新")
             return
 
         try:
@@ -418,14 +430,13 @@ class PiperRobotTrainer:
             return None
 
     def save_snapshot(self):
-        if self.agent is None:
-            return
         snapshot_path = self.output_dir / f'snapshot_robot_{self._global_step}.pt'
         payload = {
-            'agent': self.agent,
             '_global_step': self._global_step,
             '_global_episode': self._global_episode
         }
+        if self.agent is not None:
+            payload['agent'] = self.agent
         torch.save(payload, snapshot_path)
         print(f"\n✅ 模型保存: {snapshot_path.name}")
 
@@ -447,8 +458,10 @@ class PiperRobotTrainer:
                 for k, v in payload.items():
                     if k in self.__dict__:
                         self.__dict__[k] = v
-                        if k == 'agent':
-                            self.agent.to(self.device)
+                        if k == 'agent' and v is not None:
+                            for attr_name in ['encoder', 'actor', 'critic', 'critic_target', 'value_predictor']:
+                                if hasattr(v, attr_name):
+                                    getattr(v, attr_name).to(self.device)
             print("✅ 快照加载成功")
             return True
         except Exception as e:
@@ -614,9 +627,11 @@ class PiperRobotTrainer:
                 )
                 self.replay_storage.add(ts_last)
 
-                # 策略更新
+                # 策略更新：seed阶段结束后，每5个episode更新一次
                 if (episode + 1) % self.update_every_episodes == 0 and self._global_step >= self.seed_steps:
                     self.update_policy(num_updates=100)
+                elif (episode + 1) % self.update_every_episodes == 0 and self._global_step < self.seed_steps:
+                    print(f"  Seed阶段未完成 ({self._global_step}/{self.seed_steps})，跳过策略更新")
 
                 episodes_bar.set_postfix({
                     'Last Reward': f"{self.episode_reward:.1f}",
@@ -642,9 +657,11 @@ class PiperRobotTrainer:
         if self.piper_arm is not None:
             try:
                 with self.arm_command_lock:
-                    self.piper_arm.emergency_stop()
-                    time.sleep(0.2)
-                    self.piper_arm.disable()
+                    self.piper_arm.move_to_pose(
+                        self.X, self.Y, self.Z,
+                        self.RX, self.RY, self.RZ,
+                        speed=20
+                    )
             except:
                 pass
 
@@ -666,26 +683,46 @@ def main():
 
     try:
         with hydra.initialize(config_path='cfgs', version_base=None):
-            cfg = hydra.compose(config_name='config')
-    except:
-        print("⚠️  无法加载Hydra配置，使用随机策略")
+            cfg = hydra.compose(config_name='config', overrides=['agent=mentor_mw'])
+    except Exception as e:
+        print(f"⚠️  无法加载Hydra配置: {e}")
         cfg = None
 
     trainer = PiperRobotTrainer()
     trainer.init_hardware()
 
+    agent_initialized = False
+
     if cfg is not None:
         try:
-            import agents.mentor_mw as mentor_mw
             obs_spec = trainer._obs_spec
             act_spec = trainer._act_spec
             cfg.agent.obs_shape = obs_spec.shape
             cfg.agent.action_shape = act_spec.shape
             trainer.agent = hydra.utils.instantiate(cfg.agent)
             trainer.agent = trainer.agent.to(trainer.device)
-            print("✅ Agent初始化成功")
+            agent_initialized = True
+            print("✅ Agent初始化成功（Hydra）")
         except Exception as e:
-            print(f"⚠️  Agent初始化失败: {e}")
+            import traceback
+            print(f"❌ Agent初始化失败（Hydra）:")
+            traceback.print_exc()
+
+    if not agent_initialized:
+        print("Hydra不可用，使用独立Agent配置...")
+        try:
+            from agent_piper import create_piper_agent
+            trainer.agent = create_piper_agent(
+                obs_shape=trainer._obs_spec.shape,
+                action_shape=trainer._act_spec.shape,
+                device=trainer.device,
+            )
+            agent_initialized = True
+            print("✅ Agent初始化成功（独立配置）")
+        except Exception as e:
+            import traceback
+            print(f"❌ Agent初始化失败:")
+            traceback.print_exc()
             trainer.agent = None
 
     if args.snapshot:
