@@ -50,8 +50,8 @@ class PiperRobotTrainer:
 
         self.work_dir = Path.cwd()
 
-        self.IMG_HEIGHT = 256
-        self.IMG_WIDTH = 256
+        self.IMG_HEIGHT = 128
+        self.IMG_WIDTH = 128
         self.frame_stack = 3
         self.batch_size = 256
         self.update_every_episodes = 5
@@ -99,6 +99,9 @@ class PiperRobotTrainer:
         self.WS_X_MIN, self.WS_X_MAX = 150.0, 450.0
         self.WS_Y_MIN, self.WS_Y_MAX = -150.0, 150.0
         self.WS_Z_MIN, self.WS_Z_MAX = 150.0, 350.0
+
+        # 时间惩罚：非干预帧每秒-1 reward，鼓励agent高效行动
+        self.time_penalty_per_step = -1.0 * self.action_interval  # ≈ -0.08/步
 
         self.random_amplitude = 0.6
         self.random_drift_prob = 0.2
@@ -475,40 +478,47 @@ class PiperRobotTrainer:
         frame = self._latest_frame.copy()
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        y_pos = 30
-        line_spacing = 25
+        # 根据图像尺寸自适应字号
+        scale = min(self.IMG_HEIGHT, self.IMG_WIDTH) / 256.0
+        y_pos = int(25 * scale)
+        line_spacing = int(20 * scale)
+        font_title = max(0.5, 0.7 * scale)
+        font_body = max(0.35, 0.5 * scale)
+        font_small = max(0.3, 0.4 * scale)
+        thick = max(1, int(2 * scale))
+        thin = max(1, int(1 * scale))
 
         if self._global_step < self.seed_steps:
             cv2.putText(frame_bgr, "SEEDING...", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 140, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, font_title, (0, 140, 255), thick)
             y_pos += line_spacing
             cv2.putText(frame_bgr, f"Seed: {self._global_step}/{self.seed_steps}", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 1)
+                       cv2.FONT_HERSHEY_SIMPLEX, font_body, (0, 140, 255), thin)
         else:
             cv2.putText(frame_bgr, "TRAINING", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, font_title, (0, 255, 0), thick)
         y_pos += line_spacing
 
         if self.is_intervening:
             cv2.putText(frame_bgr, "INTERVENING", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, font_body, (0, 0, 255), thick)
         else:
             cv2.putText(frame_bgr, "Model Control", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, font_body, (255, 255, 0), thick)
         y_pos += line_spacing
 
         cv2.putText(frame_bgr, f"Step: {self._global_step}", (10, y_pos),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, font_body, (255, 255, 255), thick)
         y_pos += line_spacing
         cv2.putText(frame_bgr, f"Episode: {self._global_episode + 1}", (10, y_pos),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, font_body, (255, 255, 255), thick)
         y_pos += line_spacing
         cv2.putText(frame_bgr, f"Reward: {self.episode_reward:.1f}", (10, y_pos),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, font_body, (255, 255, 255), thick)
         y_pos += line_spacing
 
-        cv2.putText(frame_bgr, "SPACE=+10, s=Save, q=Quit", (10, y_pos),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+        cv2.putText(frame_bgr, "SPACE=+10 s=Save q=Quit", (10, y_pos),
+                   cv2.FONT_HERSHEY_SIMPLEX, font_small, (0, 200, 255), thin)
 
         cv2.imshow("Piper Robot Training", frame_bgr)
 
@@ -579,6 +589,9 @@ class PiperRobotTrainer:
                     reward = self._reward
                     if self._reward != 0:
                         self._reward = 0
+                    # 非干预帧加时间惩罚，干预帧不加
+                    if not is_intervened:
+                        reward += self.time_penalty_per_step
                     self.episode_reward += reward
 
                     # 缓冲区
