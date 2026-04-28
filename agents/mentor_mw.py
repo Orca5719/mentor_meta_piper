@@ -57,12 +57,16 @@ class Encoder(nn.Module):
         assert encoder_type in ['scratch', 'spawnnet']
                 
         if self.encoder_type == 'scratch':
-            self.repr_dim = 32 * 35 * 35
             self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
                                         nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                         nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                         nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                         nn.ReLU())
+            # 动态计算repr_dim，兼容不同输入尺寸
+            with torch.no_grad():
+                dummy = torch.zeros(1, *obs_shape)
+                out = self.convnet(dummy)
+                self.repr_dim = out.shape[1] * out.shape[2] * out.shape[3]
             self.apply(utils.weight_init)
         
         if self.encoder_type == 'spawnnet':
